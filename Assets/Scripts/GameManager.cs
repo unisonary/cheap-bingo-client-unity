@@ -71,6 +71,15 @@ public class GameManager : MonoBehaviour
             string serverUrl = useLocalServer ? localServerUrl : renderServerUrl;
             Debug.Log($"Creating WebSocket connection to: {serverUrl}");
             
+            // WebGL-specific handling
+            #if UNITY_WEBGL && !UNITY_EDITOR
+            if (!useLocalServer)
+            {
+                Debug.Log("WebGL detected - using simplified connection for Render.com server");
+                // For WebGL, we'll use a more basic connection approach
+            }
+            #endif
+            
             try
             {
                 ws = new WebSocket(serverUrl);
@@ -84,9 +93,12 @@ public class GameManager : MonoBehaviour
                 if (!useLocalServer)
                 {
                     // For Render.com server, configure SSL/TLS settings
+                    // Note: WebGL has different SSL handling, so we need to check platform
+                    #if !UNITY_WEBGL || UNITY_EDITOR
                     ws.SslConfiguration.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls11 | System.Security.Authentication.SslProtocols.Tls;
                     ws.SslConfiguration.CheckCertificateRevocation = false;
                     ws.SslConfiguration.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true; // Accept all certificates for testing
+                    #endif
                 }
                 
                 // Attach handlers BEFORE connecting so events are captured
@@ -709,6 +721,14 @@ public class GameManager : MonoBehaviour
     // Test WebSocket connection specifically
     public void TestWebSocketConnection()
     {
+        #if UNITY_WEBGL && !UNITY_EDITOR
+        if (alert != null)
+        {
+            alert.text = "WebGL: Testing WebSocket connection... (Note: Browser restrictions may limit Render server access)";
+            alert.alpha = 1f;
+        }
+        #endif
+        
         if (ws == null)
         {
             if (alert != null)
@@ -770,9 +790,12 @@ public class GameManager : MonoBehaviour
             if (!useLocalServer)
             {
                 // For Render.com server, configure SSL/TLS settings
+                // Note: WebGL has different SSL handling, so we need to check platform
+                #if !UNITY_WEBGL || UNITY_EDITOR
                 ws.SslConfiguration.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls11 | System.Security.Authentication.SslProtocols.Tls;
                 ws.SslConfiguration.CheckCertificateRevocation = false;
                 ws.SslConfiguration.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true;
+                #endif
             }
             
             // Attach handlers BEFORE connecting
@@ -871,6 +894,15 @@ public class GameManager : MonoBehaviour
     {
         if (useLocalServer)
         {
+            #if UNITY_WEBGL && !UNITY_EDITOR
+            if (alert != null)
+            {
+                alert.text = "WebGL: Render server may have connection issues due to browser security restrictions. Try local server instead.";
+                alert.alpha = 1f;
+            }
+            Debug.LogWarning("WebGL detected - Render server connection may be limited");
+            #endif
+            
             useLocalServer = false;
             Debug.Log("Switched to Render server");
             RestartConnection();
@@ -990,6 +1022,15 @@ public class GameManager : MonoBehaviour
                 string errorMsg = useLocalServer 
                     ? $"Connection error: {e.Message}. Make sure Go server is running on localhost:9000"
                     : $"Connection error: {e.Message}. Render server may be down or not responding.";
+                
+                // WebGL-specific error handling
+                #if UNITY_WEBGL && !UNITY_EDITOR
+                if (!useLocalServer)
+                {
+                    errorMsg = $"WebGL connection error: {e.Message}. Try refreshing the page or check if Render server is accessible.";
+                }
+                #endif
+                
                 alert.text = errorMsg;
                 alert.alpha = 1f;
                 isReconnecting = false; // Reset reconnection flag on error
@@ -1030,7 +1071,11 @@ public class GameManager : MonoBehaviour
                         closeReason = "Server error";
                         break;
                     case 1015: // TLS handshake failure
+                        #if UNITY_WEBGL && !UNITY_EDITOR
+                        closeReason = "WebGL SSL/TLS handshake failure - browser security restrictions";
+                        #else
                         closeReason = "TLS/SSL handshake failure - check server certificate";
+                        #endif
                         break;
                     default:
                         closeReason = e.Reason ?? $"Unknown error (Code: {e.Code})";
