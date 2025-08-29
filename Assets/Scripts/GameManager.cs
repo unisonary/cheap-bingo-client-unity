@@ -72,7 +72,7 @@ public class GameManager : MonoBehaviour
                 alert.alpha = 1f;
             }
         };
-        
+
         ws.OnMessage += SetMessage;
         ws.OnError += (_, e) =>
         {
@@ -85,7 +85,7 @@ public class GameManager : MonoBehaviour
             Debug.Log($"WebSocket closed: Code {e.Code}, Reason: {e.Reason}");
             alert.text = $"Connection closed: {e.Reason}. Local server may be down.";
             alert.alpha = 1f;
-            
+
             if (roomReady)
             {
                 RoomResponse data = default;
@@ -227,13 +227,13 @@ public class GameManager : MonoBehaviour
     {
         float timeout = 5f;
         float elapsed = 0f;
-        
+
         while (!ws.IsAlive && elapsed < timeout)
         {
             elapsed += Time.deltaTime;
             yield return null;
         }
-        
+
         if (ws.IsAlive)
         {
             ProceedWithCreateRoom();
@@ -459,11 +459,11 @@ public class GameManager : MonoBehaviour
     private System.Collections.IEnumerator CheckLocalServerStatus()
     {
         Debug.Log("Checking if local server is reachable...");
-        
+
         using (UnityEngine.Networking.UnityWebRequest request = UnityEngine.Networking.UnityWebRequest.Get("http://localhost:9000/"))
         {
             yield return request.SendWebRequest();
-            
+
             if (request.result == UnityEngine.Networking.UnityWebRequest.Result.Success)
             {
                 Debug.Log($"Local HTTP check successful: {request.responseCode}");
@@ -485,16 +485,16 @@ public class GameManager : MonoBehaviour
     {
         float timeout = 10f;
         float elapsed = 0f;
-        
+
         Debug.Log("Starting connection monitoring...");
-        
+
         while (!ws.IsAlive && elapsed < timeout)
         {
             elapsed += Time.deltaTime;
             Debug.Log($"Connection attempt: {elapsed:F1}s elapsed, Status: {ws.ReadyState}");
             yield return new WaitForSeconds(0.5f);
         }
-        
+
         if (ws.IsAlive)
         {
             Debug.Log("WebSocket connection established successfully!");
