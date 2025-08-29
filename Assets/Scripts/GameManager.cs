@@ -54,7 +54,8 @@ public class GameManager : MonoBehaviour
 
         if (ws == null)
         {
-            ws = new WebSocket("ws://bingo-omp.herokuapp.com/ws");
+            // ws = new WebSocket("ws://bingo-omp.herokuapp.com/ws");
+            ws = new WebSocket("ws://localhost:9000/ws");
             ws.Connect();
             Debug.Log("Connection tried");
         }
