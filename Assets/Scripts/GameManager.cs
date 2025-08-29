@@ -50,10 +50,7 @@ public class GameManager : MonoBehaviour
 
     private void Start()
     {
-        checkWinner = new CheckWinner();
-
-        // First check if local server is reachable via HTTP
-        StartCoroutine(CheckLocalServerStatus());
+        checkWinner = new CheckWinner();       
 
         if (ws == null)
         {
@@ -198,7 +195,6 @@ public class GameManager : MonoBehaviour
             }
         });
     }
-
 
     public void CreateRoomClick()
     {
@@ -455,32 +451,7 @@ public class GameManager : MonoBehaviour
             }
         }
     }
-
-    private System.Collections.IEnumerator CheckLocalServerStatus()
-    {
-        Debug.Log("Checking if local server is reachable...");
-
-        using (UnityEngine.Networking.UnityWebRequest request = UnityEngine.Networking.UnityWebRequest.Get("http://localhost:9000/"))
-        {
-            yield return request.SendWebRequest();
-
-            if (request.result == UnityEngine.Networking.UnityWebRequest.Result.Success)
-            {
-                Debug.Log($"Local HTTP check successful: {request.responseCode}");
-                Debug.Log($"Response: {request.downloadHandler.text}");
-            }
-            else
-            {
-                Debug.LogError($"Local HTTP check failed: {request.error}");
-                if (alert != null)
-                {
-                    alert.text = $"Local server unreachable: {request.error}. Make sure Go server is running on localhost:9000";
-                    alert.alpha = 1f;
-                }
-            }
-        }
-    }
-
+    
     private System.Collections.IEnumerator MonitorConnection()
     {
         float timeout = 10f;
