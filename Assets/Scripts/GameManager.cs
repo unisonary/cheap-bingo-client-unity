@@ -52,24 +52,47 @@ public class GameManager : MonoBehaviour
     {
         checkWinner = new CheckWinner();
 
+        // First check if local server is reachable via HTTP
+        StartCoroutine(CheckLocalServerStatus());
+
         if (ws == null)
         {
-            // ws = new WebSocket("ws://bingo-omp.herokuapp.com/ws");
+            // For local Windows testing - use localhost
             ws = new WebSocket("ws://localhost:9000/ws");
             ws.Connect();
-            Debug.Log("Connection tried");
+            Debug.Log("Attempting WS connection to localhost:9000");
         }
 
+        ws.OnOpen += (_, e) =>
+        {
+            Debug.Log("WebSocket connection opened successfully!");
+            if (alert != null)
+            {
+                alert.text = "Connected to server successfully!";
+                alert.alpha = 1f;
+            }
+        };
+        
         ws.OnMessage += SetMessage;
+        ws.OnError += (_, e) =>
+        {
+            Debug.LogError($"WebSocket error: {e.Message}");
+            alert.text = $"Connection error: {e.Message}. Make sure Go server is running on localhost:9000";
+            alert.alpha = 1f;
+        };
         ws.OnClose += (_, e) =>
         {
+            Debug.Log($"WebSocket closed: Code {e.Code}, Reason: {e.Reason}");
+            alert.text = $"Connection closed: {e.Reason}. Local server may be down.";
+            alert.alpha = 1f;
+            
             if (roomReady)
             {
                 RoomResponse data = default;
                 data.channel = "exit-room";
                 data.roomCode = roomCode;
                 data.isCreator = !amICreator;
-                ws.Send(JsonUtility.ToJson(data));
+                try { ws.Send(JsonUtility.ToJson(data)); } catch { }
                 SceneManager.LoadScene(0);
             }
         };
@@ -181,18 +204,52 @@ public class GameManager : MonoBehaviour
     {
         if (!ws.IsAlive)
         {
-            ws.Connect();
-            if (!ws.IsAlive)
+            try
             {
-                alert.text = "Please check your network connection";
+                ws.Connect();
+                // Wait a bit for connection
+                StartCoroutine(WaitForConnection());
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Connection failed: {e.Message}");
+                alert.text = "Connection failed. Please check your network.";
                 alert.alpha = 1f;
-                return;
             }
         }
+        else
+        {
+            ProceedWithCreateRoom();
+        }
+    }
+
+    private System.Collections.IEnumerator WaitForConnection()
+    {
+        float timeout = 5f;
+        float elapsed = 0f;
+        
+        while (!ws.IsAlive && elapsed < timeout)
+        {
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+        
+        if (ws.IsAlive)
+        {
+            ProceedWithCreateRoom();
+        }
+        else
+        {
+            alert.text = "Connection timeout. Please try again.";
+            alert.alpha = 1f;
+        }
+    }
+
+    private void ProceedWithCreateRoom()
+    {
         creatorName = nameInput.text.Trim();
         if (creatorName.IsNullOrEmpty())
         {
-            //UnityEditor.EditorUtility.DisplayDialog("Error!", "Please enter your name", "Ok");
             alert.text = "Please enter your name";
             alert.alpha = 1f;
         }
@@ -363,11 +420,31 @@ public class GameManager : MonoBehaviour
                 data.channel = "exit-room";
                 data.roomCode = roomCode;
                 data.isCreator = !amICreator;
-                ws.Send(JsonUtility.ToJson(data));
+                try { ws.Send(JsonUtility.ToJson(data)); } catch { }
                 SceneManager.LoadScene(0);
             }
             else
                 Application.Quit();
+        }
+
+        // Monitor connection status
+        if (ws != null && !ws.IsAlive && roomReady)
+        {
+            Debug.LogWarning("WebSocket connection lost, attempting to reconnect...");
+            try
+            {
+                ws.Connect();
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Reconnection failed: {e.Message}");
+            }
+        }
+
+        // Debug connection status
+        if (Input.GetKeyDown(KeyCode.C))
+        {
+            TestConnection();
         }
 
         while (_actions.Count > 0)
@@ -375,6 +452,83 @@ public class GameManager : MonoBehaviour
             if (_actions.TryDequeue(out var action))
             {
                 action?.Invoke();
+            }
+        }
+    }
+
+    private System.Collections.IEnumerator CheckLocalServerStatus()
+    {
+        Debug.Log("Checking if local server is reachable...");
+        
+        using (UnityEngine.Networking.UnityWebRequest request = UnityEngine.Networking.UnityWebRequest.Get("http://localhost:9000/"))
+        {
+            yield return request.SendWebRequest();
+            
+            if (request.result == UnityEngine.Networking.UnityWebRequest.Result.Success)
+            {
+                Debug.Log($"Local HTTP check successful: {request.responseCode}");
+                Debug.Log($"Response: {request.downloadHandler.text}");
+            }
+            else
+            {
+                Debug.LogError($"Local HTTP check failed: {request.error}");
+                if (alert != null)
+                {
+                    alert.text = $"Local server unreachable: {request.error}. Make sure Go server is running on localhost:9000";
+                    alert.alpha = 1f;
+                }
+            }
+        }
+    }
+
+    private System.Collections.IEnumerator MonitorConnection()
+    {
+        float timeout = 10f;
+        float elapsed = 0f;
+        
+        Debug.Log("Starting connection monitoring...");
+        
+        while (!ws.IsAlive && elapsed < timeout)
+        {
+            elapsed += Time.deltaTime;
+            Debug.Log($"Connection attempt: {elapsed:F1}s elapsed, Status: {ws.ReadyState}");
+            yield return new WaitForSeconds(0.5f);
+        }
+        
+        if (ws.IsAlive)
+        {
+            Debug.Log("WebSocket connection established successfully!");
+        }
+        else
+        {
+            Debug.LogError($"Connection failed after {timeout}s. ReadyState: {ws.ReadyState}");
+            if (alert != null)
+            {
+                alert.text = "Connection to Render server failed. Server may be down.";
+                alert.alpha = 1f;
+            }
+        }
+    }
+
+    private void TestConnection()
+    {
+        if (ws != null)
+        {
+            Debug.Log($"WebSocket Status: IsAlive={ws.IsAlive}, ReadyState={ws.ReadyState}");
+            if (alert != null)
+            {
+                string status = ws.IsAlive ? "Connected to local server" : "Disconnected from local server";
+                alert.text = status;
+                alert.alpha = 1f;
+            }
+        }
+        else
+        {
+            Debug.Log("WebSocket is null");
+            if (alert != null)
+            {
+                alert.text = "WebSocket not initialized";
+                alert.alpha = 1f;
             }
         }
     }
