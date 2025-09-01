@@ -1650,6 +1650,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1420293808}
   - component: {fileID: 1420293807}
+  - component: {fileID: 1420293809}
   m_Layer: 0
   m_Name: Scripts
   m_TagString: Untagged
@@ -1686,6 +1687,26 @@ Transform:
   m_Father: {fileID: 0}
   m_RootOrder: 3
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1420293809
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1420293806}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3d6ab6da7c4875f44827348dfff0610e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  useLocalServer: 0
+  localServerUrl: ws://localhost:9000/ws
+  renderServerUrl: wss://cheap-bingo-go-server.onrender.com/ws
+  localHttpUrl: http://localhost:9000/
+  renderHttpUrl: https://cheap-bingo-go-server.onrender.com/
+  connectionTimeout: 15
+  reconnectCooldown: 5
+  maxReconnectAttempts: 3
 --- !u!1 &1494771709
 GameObject:
   m_ObjectHideFlags: 0

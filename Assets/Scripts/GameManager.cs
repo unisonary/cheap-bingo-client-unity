@@ -2,19 +2,9 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using TMPro;
 using UnityEngine.UI;
-using WebSocketSharp;
-using System.Collections.Concurrent;
-using System;
 
 public class GameManager : MonoBehaviour
 {
-    [Header("Server Configuration")]
-    [SerializeField] private bool useLocalServer = false;
-    [SerializeField] private string localServerUrl = "ws://localhost:9000/ws";
-    [SerializeField] private string renderServerUrl = "wss://cheap-bingo-go-server.onrender.com/ws";
-    [SerializeField] private string localHttpUrl = "http://localhost:9000/";
-    [SerializeField] private string renderHttpUrl = "https://cheap-bingo-go-server.onrender.com/";
-    
     [Header("UI Elements")]
     [SerializeField] private TMP_InputField nameInput, roomCodeInput;
     [SerializeField] private TMP_Text alert;
@@ -28,10 +18,10 @@ public class GameManager : MonoBehaviour
     private string roomCode, creatorName, joinerName, winner, lastMove;
     private bool amICreator, roomReady = false, isMyMove = false;
     private CheckWinner checkWinner;
-    private readonly ConcurrentQueue<Action> _actions = new ConcurrentQueue<Action>();
     private int winners = 0;
 
     private static GameObject mainManagerInstance;
+    
     private void Awake()
     {
         if (mainManagerInstance != null)
@@ -41,318 +31,219 @@ public class GameManager : MonoBehaviour
         DontDestroyOnLoad(this);
     }
 
-    private struct RoomResponse
-    {
-        public string channel;
-        public string res;
-        public string roomCode;
-        public int dimension;
-        public bool isCreator;
-        public int move;
-        public string appVersion;
-    }
-
-    private WebSocket ws;
-    private bool isReconnecting = false;
-    private float lastReconnectAttempt = 0f;
-    private const float RECONNECT_COOLDOWN = 5f;
-    private int reconnectAttempts = 0;
-    private const int MAX_RECONNECT_ATTEMPTS = 3;
-
     private void Start()
     {
         checkWinner = new CheckWinner();
+        SetupNetworkEvents();
+    }
 
-        // Check server status based on configuration
-        StartCoroutine(CheckServerStatus());
+    private void SetupNetworkEvents()
+    {
+        // Subscribe to network events
+        NetworkManager.Instance.OnRoomCreated += HandleRoomCreated;
+        NetworkManager.Instance.OnGameReady += HandleGameReady;
+        NetworkManager.Instance.OnGameMove += HandleGameMove;
+        NetworkManager.Instance.OnWinClaim += HandleWinClaim;
+        NetworkManager.Instance.OnRetry += HandleRetry;
+        NetworkManager.Instance.OnExitRoom += HandleExitRoom;
+        NetworkManager.Instance.OnError += HandleNetworkError;
+        NetworkManager.Instance.OnConnected += HandleConnected;
+        NetworkManager.Instance.OnDisconnected += HandleDisconnected;
+    }
 
-        if (ws == null)
+    #region Network Event Handlers
+
+    private void HandleRoomCreated(string roomCode, string playerName)
+    {
+        this.roomCode = roomCode;
+        Debug.Log($"Room code = {roomCode}");
+        
+        SceneManager.LoadSceneAsync(1).completed += delegate
         {
-            string serverUrl = useLocalServer ? localServerUrl : renderServerUrl;
-            Debug.Log($"Creating WebSocket connection to: {serverUrl}");
-            
-            // WebGL-specific handling
-            #if UNITY_WEBGL && !UNITY_EDITOR
-            if (!useLocalServer)
+            SetupGameScene();
+            gameStatus.text = "Share room code with someone to join";
+        };
+    }
+
+    private void HandleGameReady(string playerName, string roomCode)
+    {
+        roomReady = true;
+        isMyMove = amICreator;
+
+        if (amICreator)
+        {
+            joinerName = playerName;
+            if (joinerName == creatorName)
             {
-                Debug.Log("WebGL detected - using simplified connection for Render.com server");
-                // For WebGL, we'll use a more basic connection approach
+                creatorName = $"{creatorName} (1)";
+                joinerName = $"{joinerName} (2)";
             }
-            #endif
-            
-            try
+            players.text = $"Players:\n{creatorName} (You)\n{joinerName} (Joiner)";
+            gameStatus.text = "Game is ready\nYou move first";
+        }
+        else
+        {
+            creatorName = playerName;
+            if (joinerName == creatorName)
             {
-                ws = new WebSocket(serverUrl);
-                Debug.Log("WebSocket object created successfully");
-                
-                // Set additional WebSocket options for better connection handling
-                ws.WaitTime = System.TimeSpan.FromSeconds(10);
-                ws.Compression = CompressionMethod.None; // Disable compression for better compatibility
-                
-                // Add SSL/TLS configuration for secure connections
-                if (!useLocalServer)
-                {
-                    // For Render.com server, configure SSL/TLS settings
-                    // Note: WebGL has different SSL handling, so we need to check platform
-                    #if !UNITY_WEBGL || UNITY_EDITOR
-                    ws.SslConfiguration.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls11 | System.Security.Authentication.SslProtocols.Tls;
-                    ws.SslConfiguration.CheckCertificateRevocation = false;
-                    ws.SslConfiguration.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true; // Accept all certificates for testing
-                    #endif
-                }
-                
-                // Attach handlers BEFORE connecting so events are captured
-                AttachWebSocketHandlers();
-                
-                // Use non-blocking connect to avoid freezing main thread
-                ws.ConnectAsync();
-                Debug.Log($"ConnectAsync() called for {(useLocalServer ? "local" : "Render")} server");
-                
-                // Start connection timeout monitoring
-                StartCoroutine(MonitorConnectionTimeout());
+                creatorName = $"{creatorName} (1)";
+                joinerName = $"{joinerName} (2)";
             }
-            catch (System.Exception e)
+            SceneManager.LoadSceneAsync(1).completed += delegate
             {
-                Debug.LogError($"Failed to create or connect WebSocket: {e.Message}");
-                Debug.LogError($"Stack trace: {e.StackTrace}");
-                
-                if (alert != null)
-                {
-                    string serverType = useLocalServer ? "local" : "Render";
-                    alert.text = $"Failed to create WebSocket connection to {serverType} server: {e.Message}";
-                    alert.alpha = 1f;
-                }
-            }
+                SetupGameScene();
+                players.text += "\n" + joinerName + " (You)";
+                gameStatus.text = $"Game is ready\n{creatorName} moves first";
+            };
         }
     }
 
-    private void SetMessage(object _, MessageEventArgs e)
+    private void HandleGameMove(int move)
     {
-        _actions.Enqueue(() =>
-        {
-            RoomResponse data = JsonUtility.FromJson<RoomResponse>(e.Data);
-            switch (data.channel)
-            {
-                case "create-room":
-                    SceneManager.LoadSceneAsync(1).completed += delegate
-                    {
-                        roomCode = data.roomCode;
+        gameStatus.text = $"Current move:\n{move}\nYour turn now";
 
-                        Debug.Log($"Room code = {roomCode}");
-                        SetupGameScene();
-                        gameStatus.text = "Share room code with someone to join";
-                    };
-                    break;
-                case "game-ready":
-                    roomReady = true;
-                    isMyMove = amICreator;
+        if (!string.IsNullOrEmpty(lastMove))
+            GameObject.Find(lastMove).GetComponent<Button>().image.color = markedColor;
 
-                    if (amICreator)
-                    {
-                        joinerName = data.res;
-                        if (joinerName == creatorName)
-                        {
-                            creatorName = $"{creatorName} (1)";
-                            joinerName = $"{joinerName} (2)";
-                        }
-                        players.text = $"Players:\n{creatorName} (You)\n{joinerName} (Joiner)";
-                        gameStatus.text = "Game is ready\nYou move first";
-                    }
-                    else
-                    {
-                        creatorName = data.res;
-                        if (joinerName == creatorName)
-                        {
-                            creatorName = $"{creatorName} (1)";
-                            joinerName = $"{joinerName} (2)";
-                        }
-                        SceneManager.LoadSceneAsync(1).completed += delegate
-                        {
-                            SetupGameScene();
-                            players.text += "\n" + joinerName + " (You)";
-                            gameStatus.text = $"Game is ready\n{creatorName} moves first";
-                        };
-                    }
-                    break;
-                case "game-on":
-                    gameStatus.text = $"Current move:\n{data.move}\nYour turn now";
+        // Search the incoming move in two dimensional array using linear search algorithm
+        int[] ndx = checkWinner.GetIndex(move, GridPopulator.arrBoard);
+        GridPopulator.arrBoard[ndx[0], ndx[1]] = 0;
+        Button btn = GameObject.Find($"{ndx[0]}{ndx[1]}").GetComponent<Button>();
+        btn.GetComponentInChildren<TMP_Text>().text = "x";
+        btn.image.color = oppLastColor;
+        isMyMove = true;
+        lastMove = $"{ndx[0]}{ndx[1]}";
 
-                    if (!lastMove.IsNullOrEmpty())
-                        GameObject.Find(lastMove).GetComponent<Button>().image.color = markedColor;
-
-                    //searching the incoming move in two dimensional array using
-                    //linear search algorithm
-                    int[] ndx = checkWinner.GetIndex(data.move, GridPopulator.arrBoard);
-                    GridPopulator.arrBoard[ndx[0], ndx[1]] = 0;
-                    Button btn = GameObject.Find($"{ndx[0]}{ndx[1]}").GetComponent<Button>();
-                    btn.GetComponentInChildren<TMP_Text>().text = "x";
-                    btn.image.color = oppLastColor;
-                    isMyMove = true;
-                    lastMove = $"{ndx[0]}{ndx[1]}";
-
-                    SetBingoStatus();
-                    break;
-                case "win-claim":
-                    winners++;
-                    winner = amICreator ? joinerName : creatorName;
-                    gameStatus.text = $"Yayy, {winner} is the winner\nYou lost";
-                    Debug.Log($"Winner is {winner}");
-
-                    // checking for draw
-                    if (winners > 1)
-                        gameStatus.text = "Oh wait! It's a draw\nGame over";
-
-                    // showing retry button
-                    retryColor.a = 255;
-                    retryButton.image.color = retryColor;
-                    break;
-                case "retry":
-                    ResetGame(false, amICreator ? joinerName : creatorName);
-                    break;
-                case "error":
-                    // display some error
-                    // UnityEditor.EditorUtility.DisplayDialog("Error", data.res, "Ok");
-                    alert.text = data.res;
-                    alert.alpha = 1f;
-                    break;
-                case "exit-room":
-                    SceneManager.LoadScene(0);
-                    break;
-
-                default:
-                    Debug.Log("Channel not implemented");
-                    break;
-            }
-        });
+        SetBingoStatus();
     }
+
+    private void HandleWinClaim(string playerName)
+    {
+        winners++;
+        winner = amICreator ? joinerName : creatorName;
+        gameStatus.text = $"Yayy, {winner} is the winner\nYou lost";
+        Debug.Log($"Winner is {winner}");
+
+        // Check for draw
+        if (winners > 1)
+            gameStatus.text = "Oh wait! It's a draw\nGame over";
+
+        // Show retry button
+        retryColor.a = 255;
+        retryButton.image.color = retryColor;
+    }
+
+    private void HandleRetry(string playerName)
+    {
+        ResetGame(false, amICreator ? joinerName : creatorName);
+    }
+
+    private void HandleExitRoom()
+    {
+        SceneManager.LoadScene(0);
+    }
+
+    private void HandleNetworkError(string error)
+    {
+        alert.text = error;
+        alert.alpha = 1f;
+    }
+
+    private void HandleConnected()
+    {
+        if (alert != null)
+        {
+            alert.text = $"Connected to {NetworkManager.Instance.CurrentServerType} server successfully!";
+            alert.alpha = 1f;
+        }
+    }
+
+    private void HandleDisconnected(string reason)
+    {
+        if (alert != null)
+        {
+            alert.text = $"Disconnected: {reason}";
+            alert.alpha = 1f;
+        }
+    }
+
+    #endregion
+
+    #region UI Event Handlers
 
     public void CreateRoomClick()
     {
-        if (!ws.IsAlive)
-        {
-            try
-            {
-                ws.ConnectAsync();
-                // Wait a bit for connection
-                StartCoroutine(WaitForConnection());
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"Connection failed: {e.Message}");
-                alert.text = "Connection failed. Please check your network.";
-                alert.alpha = 1f;
-            }
-        }
-        else
-        {
-            ProceedWithCreateRoom();
-        }
-    }
-
-    private System.Collections.IEnumerator WaitForConnection()
-    {
-        float timeout = 5f;
-        float elapsed = 0f;
-        
-        while (!ws.IsAlive && elapsed < timeout)
-        {
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
-        
-        if (ws.IsAlive)
-        {
-            ProceedWithCreateRoom();
-        }
-        else
-        {
-            alert.text = "Connection timeout. Please try again.";
-            alert.alpha = 1f;
-        }
-    }
-
-    private void ProceedWithCreateRoom()
-    {
         creatorName = nameInput.text.Trim();
-        if (creatorName.IsNullOrEmpty())
+        if (string.IsNullOrEmpty(creatorName))
         {
             alert.text = "Please enter your name";
             alert.alpha = 1f;
+            return;
         }
-        else
+
+        if (!NetworkManager.Instance.IsConnected)
         {
-            amICreator = true;
-            RoomResponse data = default;
-            data.channel = "create-room";
-            data.res = creatorName;
-            data.dimension = 5;
-            data.appVersion = Application.version;
-            ws.Send(JsonUtility.ToJson(data));
+            alert.text = "Not connected to server. Please wait...";
+            alert.alpha = 1f;
+            return;
         }
+
+        amICreator = true;
+        NetworkManager.Instance.CreateRoom(creatorName);
     }
 
     public void JoinRoomClick()
     {
         roomCode = roomCodeInput.text.Trim();
         joinerName = nameInput.text.Trim();
-        if (roomCode.IsNullOrEmpty() || joinerName.IsNullOrEmpty())
+        if (string.IsNullOrEmpty(roomCode) || string.IsNullOrEmpty(joinerName))
         {
             alert.text = "Please enter all required details";
             alert.alpha = 1f;
             return;
         }
 
-        if (!ws.IsAlive)
+        if (!NetworkManager.Instance.IsConnected)
         {
-            try
-            {
-                ws.ConnectAsync();
-                StartCoroutine(WaitForJoinConnection());
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"Join connect failed: {e.Message}");
-                alert.text = "Connection failed. Please check your network.";
-                alert.alpha = 1f;
-            }
+            alert.text = "Not connected to server. Please wait...";
+            alert.alpha = 1f;
             return;
         }
 
-        ProceedWithJoinRoom();
-    }
-
-    private void ProceedWithJoinRoom()
-    {
         amICreator = false;
-        RoomResponse data = default;
-        data.channel = "join-room";
-        data.res = joinerName;
-        data.roomCode = roomCode;
-        data.appVersion = Application.version;
-        ws.Send(JsonUtility.ToJson(data));
+        NetworkManager.Instance.JoinRoom(roomCode, joinerName);
     }
 
-    private System.Collections.IEnumerator WaitForJoinConnection()
+    public void BingoBoardBtnClick(Button button)
     {
-        float timeout = 5f;
-        float elapsed = 0f;
+        int indices = int.Parse(button.name);
+        int x = indices / 10;
+        int y = indices % 10;
 
-        while (!ws.IsAlive && elapsed < timeout)
+        if (isMyMove && string.IsNullOrEmpty(winner) && roomReady && GridPopulator.arrBoard[x, y] != 0)
         {
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
+            if (!string.IsNullOrEmpty(lastMove))
+                GameObject.Find(lastMove).GetComponent<Button>().image.color = markedColor;
 
-        if (ws.IsAlive)
-        {
-            ProceedWithJoinRoom();
-        }
-        else
-        {
-            alert.text = "Connection timeout. Please try again.";
-            alert.alpha = 1f;
+            lastMove = button.name;
+            button.GetComponentInChildren<TMP_Text>().text = "x";
+            button.image.color = myLastColor;
+
+            NetworkManager.Instance.SendGameMove(roomCode, GridPopulator.arrBoard[x, y], !amICreator);
+
+            string turn = amICreator ? joinerName : creatorName;
+            gameStatus.text = $"Current move:\n{GridPopulator.arrBoard[x, y]}\n{turn}'s turn now";
+
+            GridPopulator.arrBoard[x, y] = 0;
+            isMyMove = false;
+
+            SetBingoStatus();
         }
     }
+
+    #endregion
+
+    #region Game Logic
 
     private void SetupGameScene()
     {
@@ -365,12 +256,7 @@ public class GameManager : MonoBehaviour
         retryButton.onClick.AddListener(delegate
         {
             ResetGame(true, amICreator ? creatorName : joinerName);
-
-            RoomResponse data = default;
-            data.channel = "retry";
-            data.roomCode = roomCode;
-            data.isCreator = !amICreator;
-            ws.Send(JsonUtility.ToJson(data));
+            NetworkManager.Instance.SendRetry(roomCode, !amICreator);
         });
 
         for (int i = 0; i < 5; i++)
@@ -386,38 +272,6 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    public void BingoBoardBtnClick(Button button)
-    {
-        int indices = int.Parse(button.name);
-        int x = indices / 10;
-        int y = indices % 10;
-
-        if (isMyMove && winner.IsNullOrEmpty() && roomReady && GridPopulator.arrBoard[x, y] != 0)
-        {
-            if (!lastMove.IsNullOrEmpty())
-                GameObject.Find(lastMove).GetComponent<Button>().image.color = markedColor;
-
-            lastMove = button.name;
-            button.GetComponentInChildren<TMP_Text>().text = "x";
-            button.image.color = myLastColor;
-
-            RoomResponse data = default;
-            data.channel = "game-on";
-            data.roomCode = roomCode;
-            data.move = GridPopulator.arrBoard[x, y];
-            data.isCreator = !amICreator;
-            ws.Send(JsonUtility.ToJson(data));
-
-            string turn = amICreator ? joinerName : creatorName;
-            gameStatus.text = $"Current move:\n{data.move}\n{turn}'s turn now";
-
-            GridPopulator.arrBoard[x, y] = 0;
-            isMyMove = false;
-
-            SetBingoStatus();
-        }
-    }
-
     private void SetBingoStatus()
     {
         int connections = checkWinner.GetConnections(GridPopulator.arrBoard);
@@ -426,21 +280,17 @@ public class GameManager : MonoBehaviour
 
         if (connections > 4)
         {
-            // stop game and declare winner
+            // Stop game and declare winner
             winners++;
             winner = amICreator ? creatorName : joinerName;
             gameStatus.text = "Yayy, you won!";
 
-            RoomResponse winClaim = default;
-            winClaim.channel = "win-claim";
-            winClaim.roomCode = roomCode;
-            winClaim.isCreator = !amICreator;
-            ws.Send(JsonUtility.ToJson(winClaim));
+            NetworkManager.Instance.SendWinClaim(roomCode, !amICreator);
 
             if (winners > 1)
                 gameStatus.text = "Oh wait! It's a draw\nGame over";
 
-            // showing retry button
+            // Show retry button
             retryColor.a = 255;
             retryButton.image.color = retryColor;
         }
@@ -448,7 +298,7 @@ public class GameManager : MonoBehaviour
 
     private void ResetGame(bool whoseTurn, string player)
     {
-        if (!winner.IsNullOrEmpty())
+        if (!string.IsNullOrEmpty(winner))
         {
             GridPopulator.SetBingoGrid();
 
@@ -461,11 +311,13 @@ public class GameManager : MonoBehaviour
             for (int i = 0; i < 5; i++)
                 GameObject.Find($"MarkT{i}").GetComponent<TMP_Text>().alpha = 0f;
 
-            // hide retry button
+            // Hide retry button
             retryColor.a = 0;
             retryButton.image.color = retryColor;
         }
     }
+
+    #endregion
 
     private void Update()
     {
@@ -473,629 +325,34 @@ public class GameManager : MonoBehaviour
         {
             if (SceneManager.GetActiveScene().buildIndex == 1)
             {
-                RoomResponse data = default;
-                data.channel = "exit-room";
-                data.roomCode = roomCode;
-                data.isCreator = !amICreator;
-                try { ws.Send(JsonUtility.ToJson(data)); } catch { }
+                NetworkManager.Instance.SendExitRoom(roomCode, !amICreator);
                 SceneManager.LoadScene(0);
             }
             else
                 Application.Quit();
         }
-
-        // Monitor connection status with proper reconnection logic
-        if (ws != null && !ws.IsAlive && roomReady && !isReconnecting)
-        {
-            float currentTime = Time.time;
-            if (currentTime - lastReconnectAttempt > RECONNECT_COOLDOWN && reconnectAttempts < MAX_RECONNECT_ATTEMPTS)
-            {
-                Debug.LogWarning($"WebSocket connection lost, attempting to reconnect... (Attempt {reconnectAttempts + 1}/{MAX_RECONNECT_ATTEMPTS})");
-                isReconnecting = true;
-                lastReconnectAttempt = currentTime;
-                reconnectAttempts++;
-                
-                StartCoroutine(AttemptReconnection());
-            }
-            else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS)
-            {
-                Debug.LogError("Maximum reconnection attempts reached. Stopping reconnection loop.");
-                if (alert != null)
-                {
-                    string serverType = useLocalServer ? "local" : "Render";
-                    alert.text = $"Connection failed after {MAX_RECONNECT_ATTEMPTS} attempts. {serverType} server may be down.";
-                    alert.alpha = 1f;
-                }
-            }
-        }
-
-        // Debug connection status
-        if (Input.GetKeyDown(KeyCode.C))
-        {
-            TestConnection();
-        }
-        
-        // Reset reconnection state (for debugging)
-        if (Input.GetKeyDown(KeyCode.X))
-        {
-            ResetReconnectionState();
-        }
-        
-        // Test server connectivity (for debugging)
-        if (Input.GetKeyDown(KeyCode.T))
-        {
-            TestServerConnectivity();
-        }
-        
-        // Test WebSocket connection specifically (for debugging)
-        if (Input.GetKeyDown(KeyCode.W))
-        {
-            TestWebSocketConnection();
-        }
-        
-        // Server switching shortcuts
-        if (Input.GetKeyDown(KeyCode.L))
-        {
-            SwitchToLocalServer();
-        }
-        
-        if (Input.GetKeyDown(KeyCode.R))
-        {
-            SwitchToRenderServer();
-        }
-
-        while (_actions.Count > 0)
-        {
-            if (_actions.TryDequeue(out var action))
-            {
-                action?.Invoke();
-            }
-        }
     }
 
-    private System.Collections.IEnumerator CheckServerStatus()
+    private void OnDestroy()
     {
-        string serverType = useLocalServer ? "local" : "Render";
-        string httpUrl = useLocalServer ? localHttpUrl : renderHttpUrl;
-        
-        Debug.Log($"Checking if {serverType} server is reachable...");
-        
-        using (UnityEngine.Networking.UnityWebRequest request = UnityEngine.Networking.UnityWebRequest.Get(httpUrl))
+        // Unsubscribe from network events
+        if (NetworkManager.Instance != null)
         {
-            // Set timeout for HTTP request
-            request.timeout = 10; // Increased timeout for better reliability
-            yield return request.SendWebRequest();
-            
-            if (request.result == UnityEngine.Networking.UnityWebRequest.Result.Success)
-            {
-                Debug.Log($"{serverType} HTTP check successful: {request.responseCode}");
-                Debug.Log($"Response: {request.downloadHandler.text}");
-                
-                if (alert != null)
-                {
-                    alert.text = $"{serverType} server is reachable. Proceeding with WebSocket connection...";
-                    alert.alpha = 1f;
-                }
-            }
-            else if (request.result == UnityEngine.Networking.UnityWebRequest.Result.ConnectionError)
-            {
-                Debug.LogError($"{serverType} HTTP connection failed: {request.error}");
-                if (alert != null)
-                {
-                    string errorMsg = useLocalServer 
-                        ? $"Local server connection failed after 10s timeout. Make sure Go server is running on localhost:9000"
-                        : $"Render server connection failed after 10s timeout. Server may be down.";
-                    alert.text = errorMsg;
-                    alert.alpha = 1f;
-                }
-            }
-            else
-            {
-                Debug.LogError($"{serverType} HTTP check failed: {request.error}");
-                if (alert != null)
-                {
-                    string errorMsg = useLocalServer 
-                        ? $"Local server unreachable: {request.error}. Make sure Go server is running on localhost:9000"
-                        : $"Render server unreachable: {request.error}. Server may be down.";
-                    alert.text = errorMsg;
-                    alert.alpha = 1f;
-                }
-            }
+            NetworkManager.Instance.OnRoomCreated -= HandleRoomCreated;
+            NetworkManager.Instance.OnGameReady -= HandleGameReady;
+            NetworkManager.Instance.OnGameMove -= HandleGameMove;
+            NetworkManager.Instance.OnWinClaim -= HandleWinClaim;
+            NetworkManager.Instance.OnRetry -= HandleRetry;
+            NetworkManager.Instance.OnExitRoom -= HandleExitRoom;
+            NetworkManager.Instance.OnError -= HandleNetworkError;
+            NetworkManager.Instance.OnConnected -= HandleConnected;
+            NetworkManager.Instance.OnDisconnected -= HandleDisconnected;
+        }
+        
+        // Notify NetworkManager about scene change
+        if (NetworkManager.Instance != null)
+        {
+            NetworkManager.Instance.OnSceneChanged();
         }
     }
-
-    private System.Collections.IEnumerator MonitorConnectionTimeout()
-    {
-        float timeout = 5f;
-        float elapsed = 0f;
-        string serverType = useLocalServer ? "local" : "Render";
-        
-        Debug.Log($"Starting {serverType} server connection timeout monitoring (5s)...");
-
-        while (!ws.IsAlive && elapsed < timeout)
-        {
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
-        
-        if (!ws.IsAlive)
-        {
-            Debug.LogWarning($"⚠️ {serverType} server connection timeout after {timeout}s! Server may be down or not responding.");
-            if (alert != null)
-            {
-                string timeoutMsg = useLocalServer 
-                    ? $"Local server connection timeout after {timeout}s. Make sure Go server is running on localhost:9000"
-                    : $"Render server connection timeout after {timeout}s. Server may be down or overloaded.";
-                alert.text = timeoutMsg;
-                alert.alpha = 1f;
-            }
-        }
-        else
-        {
-            Debug.Log($"✅ {serverType} server connection established within {elapsed:F1}s");
-        }
-    }
-
-    private System.Collections.IEnumerator MonitorConnection()
-    {
-        float timeout = 10f;
-        float elapsed = 0f;
-        
-        Debug.Log("Starting connection monitoring...");
-        
-        while (!ws.IsAlive && elapsed < timeout)
-        {
-            elapsed += Time.deltaTime;
-            Debug.Log($"Connection attempt: {elapsed:F1}s elapsed, Status: {ws.ReadyState}");
-            yield return new WaitForSeconds(0.5f);
-        }
-        
-        if (ws.IsAlive)
-        {
-            Debug.Log("WebSocket connection established successfully!");
-        }
-        else
-        {
-            Debug.LogError($"Connection failed after {timeout}s. ReadyState: {ws.ReadyState}");
-            if (alert != null)
-            {
-                alert.text = "Connection to Render server failed. Server may be down.";
-                alert.alpha = 1f;
-            }
-        }
-    }
-
-    private void TestConnection()
-    {
-        if (ws != null)
-        {
-            Debug.Log($"WebSocket Status: IsAlive={ws.IsAlive}, ReadyState={ws.ReadyState}");
-            if (alert != null)
-            {
-                string serverType = useLocalServer ? "local" : "Render";
-                string status = ws.IsAlive ? $"Connected to {serverType} server" : $"Disconnected from {serverType} server";
-                alert.text = status;
-                alert.alpha = 1f;
-            }
-        }
-        else
-        {
-            Debug.Log("WebSocket is null");
-            if (alert != null)
-            {
-                alert.text = "WebSocket not initialized";
-                alert.alpha = 1f;
-            }
-        }
-    }
-
-    // Public method to reset reconnection state and force a fresh connection attempt
-    public void ResetReconnectionState()
-    {
-        isReconnecting = false;
-        reconnectAttempts = 0;
-        lastReconnectAttempt = 0f;
-        
-        if (alert != null)
-        {
-            alert.text = "Reconnection state reset. Will attempt to reconnect if needed.";
-            alert.alpha = 1f;
-        }
-        
-        Debug.Log("Reconnection state reset");
-    }
-
-    // Public method to test server connectivity
-    public void TestServerConnectivity()
-    {
-        StartCoroutine(CheckServerStatus());
-        
-        if (alert != null)
-        {
-            string serverType = useLocalServer ? "local" : "Render";
-            alert.text = $"Testing {serverType} server connectivity...";
-            alert.alpha = 1f;
-        }
-    }
-
-    // Test WebSocket connection specifically
-    public void TestWebSocketConnection()
-    {
-        #if UNITY_WEBGL && !UNITY_EDITOR
-        if (alert != null)
-        {
-            alert.text = "WebGL: Testing WebSocket connection... (Note: Browser restrictions may limit Render server access)";
-            alert.alpha = 1f;
-        }
-        #endif
-        
-        if (ws == null)
-        {
-            if (alert != null)
-            {
-                alert.text = "WebSocket not initialized. Creating new connection...";
-                alert.alpha = 1f;
-            }
-            
-            // Force recreate WebSocket
-            if (ws != null && ws.IsAlive)
-            {
-                ws.Close();
-                ws = null;
-            }
-            
-            StartCoroutine(CreateWebSocketConnection());
-            return;
-        }
-
-        if (ws.IsAlive)
-        {
-            if (alert != null)
-            {
-                string serverType = useLocalServer ? "local" : "Render";
-                alert.text = $"WebSocket is alive and connected to {serverType} server";
-                alert.alpha = 1f;
-            }
-        }
-        else
-        {
-            if (alert != null)
-            {
-                alert.text = "WebSocket is not alive. Attempting to reconnect...";
-                alert.alpha = 1f;
-            }
-            
-            StartCoroutine(CreateWebSocketConnection());
-        }
-    }
-
-    private System.Collections.IEnumerator CreateWebSocketConnection()
-    {
-        string serverUrl = useLocalServer ? localServerUrl : renderServerUrl;
-        Debug.Log($"Creating new WebSocket connection to: {serverUrl}");
-        
-        bool connectionCreated = false;
-        System.Exception connectionException = null;
-        
-        try
-        {
-            ws = new WebSocket(serverUrl);
-            Debug.Log("WebSocket object created successfully");
-            
-            // Set additional WebSocket options for better connection handling
-            ws.WaitTime = System.TimeSpan.FromSeconds(15); // Increased timeout
-            ws.Compression = CompressionMethod.None;
-            
-            // Add SSL/TLS configuration for secure connections
-            if (!useLocalServer)
-            {
-                // For Render.com server, configure SSL/TLS settings
-                // Note: WebGL has different SSL handling, so we need to check platform
-                #if !UNITY_WEBGL || UNITY_EDITOR
-                ws.SslConfiguration.EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls11 | System.Security.Authentication.SslProtocols.Tls;
-                ws.SslConfiguration.CheckCertificateRevocation = false;
-                ws.SslConfiguration.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true;
-                #endif
-            }
-            
-            // Attach handlers BEFORE connecting
-            AttachWebSocketHandlers();
-            
-            // Use non-blocking connect
-            ws.ConnectAsync();
-            Debug.Log($"ConnectAsync() called for {(useLocalServer ? "local" : "Render")} server");
-            
-            connectionCreated = true;
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Failed to create WebSocket connection: {e.Message}");
-            connectionException = e;
-        }
-        
-        // If connection creation failed, handle error and exit
-        if (!connectionCreated)
-        {
-            if (alert != null)
-            {
-                string errorMsg = connectionException != null 
-                    ? $"WebSocket creation failed: {connectionException.Message}"
-                    : "WebSocket creation failed";
-                alert.text = errorMsg;
-                alert.alpha = 1f;
-            }
-            yield break;
-        }
-        
-        // Wait for connection with longer timeout (outside try/catch to satisfy CS1626)
-        float timeout = 15f;
-        float elapsed = 0f;
-        
-        while (!ws.IsAlive && elapsed < timeout)
-        {
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
-        
-        if (ws.IsAlive)
-        {
-            Debug.Log("WebSocket connection established successfully!");
-            if (alert != null)
-            {
-                string serverType = useLocalServer ? "local" : "Render";
-                alert.text = $"Successfully connected to {serverType} server!";
-                alert.alpha = 1f;
-            }
-        }
-        else
-        {
-            Debug.LogWarning("WebSocket connection failed to establish");
-            if (alert != null)
-            {
-                alert.text = "WebSocket connection failed. Check server status.";
-                alert.alpha = 1f;
-            }
-        }
-    }
-
-    // Runtime server switching
-    public void ToggleServer()
-    {
-        useLocalServer = !useLocalServer;
-        string serverType = useLocalServer ? "local" : "Render";
-        Debug.Log($"Switched to {serverType} server");
-        
-        if (alert != null)
-        {
-            alert.text = $"Switched to {serverType} server. Restart to apply changes.";
-            alert.alpha = 1f;
-        }
-        
-        // Disconnect current connection
-        if (ws != null && ws.IsAlive)
-        {
-            ws.Close();
-            ws = null;
-        }
-    }
-
-    // Manual server switching methods
-    public void SwitchToLocalServer()
-    {
-        if (!useLocalServer)
-        {
-            useLocalServer = true;
-            Debug.Log("Switched to local server");
-            RestartConnection();
-        }
-    }
-
-    public void SwitchToRenderServer()
-    {
-        if (useLocalServer)
-        {
-            #if UNITY_WEBGL && !UNITY_EDITOR
-            if (alert != null)
-            {
-                alert.text = "WebGL: Render server may have connection issues due to browser security restrictions. Try local server instead.";
-                alert.alpha = 1f;
-            }
-            Debug.LogWarning("WebGL detected - Render server connection may be limited");
-            #endif
-            
-            useLocalServer = false;
-            Debug.Log("Switched to Render server");
-            RestartConnection();
-        }
-    }
-
-    private void RestartConnection()
-    {
-        if (ws != null && ws.IsAlive)
-        {
-            ws.Close();
-            ws = null;
-        }
-        
-        // Reset reconnection state
-        isReconnecting = false;
-        reconnectAttempts = 0;
-        lastReconnectAttempt = 0f;
-        
-        // Reinitialize connection
-        string serverUrl = useLocalServer ? localServerUrl : renderServerUrl;
-        ws = new WebSocket(serverUrl);
-        
-        // Attach handlers BEFORE connecting so events are captured
-        AttachWebSocketHandlers();
-        
-        // Non-blocking connect
-        ws.ConnectAsync();
-        
-        string serverType = useLocalServer ? "local" : "Render";
-        Debug.Log($"Restarted connection to {serverType} server: {serverUrl}");
-        
-        // Start timeout monitoring for restarted connection
-        StartCoroutine(MonitorConnectionTimeout());
-    }
-
-    private System.Collections.IEnumerator AttemptReconnection()
-    {
-        Debug.Log("Attempting to reconnect to WebSocket server...");
-        try
-        {
-            ws.ConnectAsync();
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Reconnection attempt failed with exception: {e.Message}");
-            if (alert != null)
-            {
-                string serverType = useLocalServer ? "local" : "Render";
-                alert.text = $"Reconnection to {serverType} server failed: {e.Message}";
-                alert.alpha = 1f;
-            }
-            isReconnecting = false;
-            yield break;
-        }
-
-        // Wait for connection to establish or fail (outside try/catch to satisfy CS1626)
-        float timeout = 10f;
-        float elapsed = 0f;
-        while (!ws.IsAlive && elapsed < timeout)
-        {
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
-
-        if (ws.IsAlive)
-        {
-            Debug.Log("Reconnection successful!");
-            reconnectAttempts = 0; // Reset counter on successful connection
-            if (alert != null)
-            {
-                string serverType = useLocalServer ? "local" : "Render";
-                alert.text = $"Reconnected to {serverType} server successfully!";
-                alert.alpha = 1f;
-            }
-        }
-        else
-        {
-            Debug.LogWarning("Reconnection attempt failed");
-            if (alert != null)
-            {
-                string serverType = useLocalServer ? "local" : "Render";
-                alert.text = $"Reconnection to {serverType} server failed. Will retry in {RECONNECT_COOLDOWN}s.";
-                alert.alpha = 1f;
-            }
-        }
-
-        isReconnecting = false;
-    }
-
-    private void AttachWebSocketHandlers()
-    {
-        if (ws == null) return;
-        
-        ws.OnOpen += (_, e) =>
-        {
-            _actions.Enqueue(() =>
-            {
-                Debug.Log("WebSocket connection opened successfully!");
-                if (alert != null)
-                {
-                    string serverType = useLocalServer ? "local" : "Render";
-                    alert.text = $"Connected to {serverType} server successfully!";
-                    alert.alpha = 1f;
-                }
-            });
-        };
-        
-        ws.OnMessage += SetMessage;
-        ws.OnError += (_, e) =>
-        {
-            _actions.Enqueue(() =>
-            {
-                Debug.LogError($"WebSocket error: {e.Message}");
-                Debug.LogError($"WebSocket error details: Exception={e.Exception?.Message}, ReadyState={ws.ReadyState}");
-                
-                string errorMsg = useLocalServer 
-                    ? $"Connection error: {e.Message}. Make sure Go server is running on localhost:9000"
-                    : $"Connection error: {e.Message}. Render server may be down or not responding.";
-                
-                // WebGL-specific error handling
-                #if UNITY_WEBGL && !UNITY_EDITOR
-                if (!useLocalServer)
-                {
-                    errorMsg = $"WebGL connection error: {e.Message}. Try refreshing the page or check if Render server is accessible.";
-                }
-                #endif
-                
-                alert.text = errorMsg;
-                alert.alpha = 1f;
-                isReconnecting = false; // Reset reconnection flag on error
-            });
-        };
-        ws.OnClose += (_, e) =>
-        {
-            _actions.Enqueue(() =>
-            {
-                Debug.Log($"WebSocket closed: Code {e.Code}, Reason: {e.Reason}");
-                Debug.Log($"WebSocket close details: WasClean={e.WasClean}, ReadyState={ws.ReadyState}");
-                
-                string serverType = useLocalServer ? "local" : "Render";
-                string closeReason = e.Reason;
-                
-                // Provide more specific error messages based on close codes
-                switch (e.Code)
-                {
-                    case 1000: // Normal closure
-                        closeReason = "Normal closure";
-                        break;
-                    case 1001: // Going away
-                        closeReason = "Server going away";
-                        break;
-                    case 1002: // Protocol error
-                        closeReason = "Protocol error";
-                        break;
-                    case 1003: // Unsupported data
-                        closeReason = "Unsupported data type";
-                        break;
-                    case 1005: // No status received
-                        closeReason = "No status received";
-                        break;
-                    case 1006: // Abnormal closure
-                        closeReason = "Abnormal closure - connection lost";
-                        break;
-                    case 1011: // Server error
-                        closeReason = "Server error";
-                        break;
-                    case 1015: // TLS handshake failure
-                        #if UNITY_WEBGL && !UNITY_EDITOR
-                        closeReason = "WebGL SSL/TLS handshake failure - browser security restrictions";
-                        #else
-                        closeReason = "TLS/SSL handshake failure - check server certificate";
-                        #endif
-                        break;
-                    default:
-                        closeReason = e.Reason ?? $"Unknown error (Code: {e.Code})";
-                        break;
-                }
-                
-                alert.text = $"Connection closed: {closeReason}. {serverType} server may be down.";
-                alert.alpha = 1f;
-                isReconnecting = false; // Reset reconnection flag on close
-                
-                if (roomReady)
-                {
-                    RoomResponse data = default;
-                    data.channel = "exit-room";
-                    data.roomCode = roomCode;
-                    data.isCreator = !amICreator;
-                    try { ws.Send(JsonUtility.ToJson(data)); } catch { }
-                    SceneManager.LoadScene(0);
-                }
-            });
-        };
-    }
-}
+} 
